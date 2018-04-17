@@ -1,0 +1,318 @@
+#!/usr/bin/perl
+
+# LDAP account creation script
+# Sean Caron <scaron@umich.edu>
+
+use Net::LDAP;
+use Net::LDAP::Extension::SetPassword;
+
+use Term::ReadKey;
+
+# Path to dictionary for password checking
+$dict = "/usr/share/dict/american-english";
+
+# Password complexity score
+$score = 0;
+
+print "\n*** LDAP Account Creation Utility ***\n\n";
+
+# Prompt for user name
+
+$uid = "";
+while ( length($uid) == 0 ) {
+    print "Uniqname: ";
+    $uid = <STDIN>;
+    chomp $uid;
+
+    if ( ($uid =~ m/[^0-9a-zA-z]/) ) {
+        print "Invalid character in username.\n";
+        $uid = "";
+    }
+}
+
+# Query the ITCS LDAP server to see if that user exists; if so, we'll use the corresponding UID
+
+$ldap = Net::LDAP->new( 'ldap.itd.umich.edu' ) or die "$@";
+$mesg = $ldap->bind;
+$mesg = $ldap->search(
+    base   => "ou=People,dc=umich,dc=edu",
+    filter => "(uid=$uid)",
+    attrs => ['uidNumber','displayName']);
+
+# Successfully located the uniqname
+    
+if (my $count = $mesg->count) {
+    my $entry = $mesg->entry(0);
+    ($uuid) || ( $uuid = $entry->get_value("uidNumber"));
+    ($fullname) || ($fullname = $entry->get_value("displayName"));
+    print "UID: " . $uuid . "\n";
+    print "Full name: " . $fullname . "\n";
+
+    chomp $fullname;
+    @names = split(' ', $fullname);
+
+    $sn = pop @names;
+    $givenName = join(' ',@names);
+    $gecos = $fullname;
+    $cn = $fullname;
+
+    $mesg = $ldap->unbind;
+}
+
+# Uniqname not found in ITCS LDAP. Query internal LDAP server and find the next available UID
+
+else {
+
+    # Query the internal LDAP server to determine the next available UID
+    $mesg = $ldap->unbind;
+
+    $ldap = Net::LDAP->new( 'ldap.somelab.umich.edu' ) or die "$@";
+    $mesg = $ldap->bind;
+    $mesg = $ldap->search(
+        base   => "ou=People,dc=somelab,dc=umich,dc=edu",
+        filter => "(uid=*)",
+        attrs => ['uidNumber']);
+
+    # Get an array of UID numbers
+    for ( $i = 0; $i < $mesg->count; $i = $i + 1 ) {
+        $uidNumbers[$i] = $mesg->entry($i)->get_value("uidNumber");
+    }
+
+    # Sort them
+    @uidNumbers = sort @uidNumbers;
+
+    # Filter out all but 2xxx UIDs
+    $last_uid = 0;
+
+    foreach (@uidNumbers) {
+        if ( $_ =~ m/^2...$/ ) {
+            $last_uid = $_
+        	
+    }
+
+    $mesg = $ldap->unbind;
+
+    # Policy is to have regular user IDs start at 2200
+    if ( $last_uid < 2200 ) {
+        $last_uid = 2199;
+    }
+
+    # Add one to the last UID in the list to get our new UID	
+    $uuid = $last_uid + 1;
+
+    print "UID: " . $uuid . "\n";
+
+    # Prompt for first name and last name since we can't get them from ITCS LDAP
+    $firstname = "";
+    while ( length($firstname) == 0 ) {
+        print "First name: ";
+        $firstname = <STDIN>;
+        chomp $firstname;
+
+        if ( ($firstname =~ m/[^0-9a-zA-z]/) ) {
+            print "Invalid character in first name.\n";
+            $firstname = "";
+        }
+    }
+
+    $lastname = "";
+    while ( length($lastname) == 0 ) {
+        print "Last name: "; 
+        $lastname = <STDIN>;
+        chomp $lastname;
+
+        if ( ($lastname =~ m/[^0-9a-zA-z]/) ) {
+            print "Invalid character in last name.\n";
+            $lastname = "";
+        }
+
+    }       
+
+    $sn = $lastname;
+    $givenName = $firstname;
+    $gecos = $firstname . ' ' . $lastname;
+    $cn = $firstname . ' ' . $lastname;
+}
+
+$dn = 'uid=' . $uid . ",ou=People,dc=somelab,dc=umich,dc=edu";
+
+$uidNumber = $uuid;
+
+# Prompt for GID. Default is GID 1007 (somelab-users)
+promptGID:
+
+print "GID [1007]: ";
+$gidNumber = <STDIN>;
+chomp $gidNumber;
+
+if ( length($gidNumber) == 0 ) {
+    $gidNumber = 1007;
+}
+
+if ( ($gidNumber =~ m/[^0-9]/) ) {
+    print "Invalid character in GID.\n";
+    goto promptGID;
+}
+
+# Prompt for home directory
+$homeDirectory = "";
+while ( length($homeDirectory) == 0 ) {
+    print "Home directory: ";
+    $homeDirectory = <STDIN>;
+    chomp $homeDirectory;
+
+    if ( ($homeDirectory =~ m/[^0-9a-zA-z\/]/) ) {
+        print "Invalid character in home directory.\n";
+        $homeDirectory = "";
+    }
+}
+
+# Prompt for shell
+promptShell:
+
+print "Shell [/bin/tcsh]: ";
+$loginShell = <STDIN>;
+chomp $loginShell;
+if ( length($loginShell) == 0 ) {
+    $loginShell = "/bin/tcsh";
+}
+
+if ( ($loginShell =~ m/[^0-9a-zA-z\/]/) ) {
+    print "Invalid character in login shell.\n";
+    goto promptShell;
+}
+
+
+$shadowMax = 99999;
+$shadowWarning = 7;
+
+print "\nSummary of account to be created:\n";
+print "   dn: $dn\n";
+print "   cn: $cn\n";
+print "   givenName: $givenName\n";
+print "   sn: $sn\n";
+print "   gecos: $gecos\n";
+print "   gidNumber: $gidNumber\n";
+print "   homeDirectory: $homeDirectory\n";
+print "   uid: $uid\n";
+print "   uidNumber: $uidNumber\n";
+print "   loginShell: $loginShell\n\n";
+
+$proceed = "";
+
+print "Proceed [y/N]? ";
+$proceed = <STDIN>;
+chomp $proceed;
+
+if ( (length($proceed) == 0) || ($proceed ne "y") ) {
+    print "User account creation aborted.\n";
+    exit 0;
+}
+
+getPassword:
+
+print "\nEnter new password for $uid: ";
+ReadMode('noecho');
+$userPassword = <STDIN>;
+chomp $userPassword;
+ReadMode(0);
+print "\n";
+
+print "Enter again to confirm: ";
+ReadMode('noecho');
+$chk_userPassword = <STDIN>;
+chomp $chk_userPassword;
+ReadMode(0);
+print "\n";
+
+# Check that the password and confirmation match
+if ( $userPassword ne $chk_userPassword ) {
+    print "The password and the confirmation do not match.\n";
+    goto getPassword;
+}
+
+# Check that the password is of appropriate length
+if ( length($userPassword) < 8 ) {
+    print "The password must be 8 characters or longer.\n";
+    goto getPassword;
+}
+
+# Check that the password does not contain the user name in question
+if ( $userPassword =~ m/$uid/ ) {
+    print "The password must not contain the user name.\n";
+    goto getPassword;
+}
+
+# Check that the password is not in the dictionary
+open DICT, $dict or die "Failed to open dictionary.";
+
+while ( $word = <DICT> ) {
+    chomp($word);
+
+    if ( length($word) > 4) {
+        if ( $userPassword =~ m/$word/ ) {
+            print "The password must not contain a dictionary word.\n";
+            close DICT;
+            goto getPassword;
+        }
+    }
+}
+
+close DICT;
+
+# Check that the password contains uppercase
+if ( $userPassword =~ m/[A-Z]/ ) {
+    $score = $score + 1;
+}
+
+# Check that the password contains lowercase
+if ( $userPassword =~ m/[a-z]/ ) {
+    $score = $score + 1;
+}
+
+# Check that the password contains numeric
+if ( $userPassword =~ m/[0-9]/ ) {
+    $score = $score + 1;
+}
+
+# Check that the password contains special character
+if ( ($userPassword =~ m/[^0-9a-zA-z]/) | ($userPassword =~ m/_/) ) {
+    $score = $score + 1;
+}
+
+# See if the complexity score is high enough
+if ( $score < 3 ) {
+    print "The password must contain three of the following: uppercase letters, lowercase letters, numerals and punctuation.\n";
+    goto getPassword;
+}
+
+# Connect to the CSG LDAP server and add the account to the directory
+$ldap = Net::LDAP->new( 'ldap.somelab.umich.edu' ) or die "$@";
+
+# Bind to LDAP
+$mesg = $ldap->bind( 'cn=admin,dc=somelab,dc=umich,dc=edu', password => 'LDAP_ADMIN_PASSWD_GOES_HERE' );
+
+# Add the account to LDAP
+$result = $ldap->add( $dn, attrs => [
+    'cn' => $cn,
+    'sn' => $sn,
+    'givenName' => $givenName,
+    'gecos' => $gecos,
+    'gidNumber' => $gidNumber,
+    'homeDirectory' => $homeDirectory,
+    'uid' => $uid,
+    'uidNumber' => $uidNumber,
+    'loginShell' => $loginShell,
+    'shadowMax' => $shadowMax,
+    'shadowWarning' => $shadowWarning,
+    'userPassword' => $userPassword,
+    'objectclass' => ['gosaAccount', 'inetOrgPerson', 'organizationalPerson', 'posixAccount', 'top', 'shadowAccount', 'person']]);
+
+$result->code && die "Failed to add entry: ", $result->error;
+
+# Add the account to the somelab-users group
+$result = $ldap->modify( 'cn=somelab-users,ou=Groups,dc=somelab,dc=umich,dc=edu', add => { 'memberUid' => $uid }  );
+
+print "\nUser $uid successfully created.\n";
+
+$mesg = $ldap->unbind;
